@@ -61,6 +61,10 @@ import com.example.travelupa.ImageDao
 import com.example.travelupa.ImageEntity
 import java.io.FileOutputStream
 import java.util.UUID
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -109,7 +113,6 @@ fun AppNavigation() {
         }
         composable(Screen.Gallery.route) {
             val context = LocalContext.current
-            // Reuse Room wiring style already used in this file (minimal change)
             val db = remember {
                 Room.databaseBuilder(
                     context,
@@ -120,9 +123,10 @@ fun AppNavigation() {
             GalleryScreen(
                 imageDao = db.imageDao(),
                 onImageSelected = { uri ->
+                    // uri from gallery items is actually a local file path string; store as-is.
                     navController.previousBackStackEntry
                         ?.savedStateHandle
-                        ?.set("selectedImageUri", uri.toString())
+                        ?.set("selectedImageLocalPath", uri.toString())
                     navController.navigateUp()
                 },
                 onBack = { navController.navigateUp() }
@@ -198,14 +202,36 @@ fun RekomendasiTempatScreen(
         )
     }
 
-    // Listen for gallery result (savedStateHandle) and keep it in state so we can prefill dialog.
-    val selectedImageUriString by navController.currentBackStackEntry
+    LaunchedEffect(Unit) {
+        fetchRekomendasiTempatWisata(
+            firestore = firestore,
+            onSuccess = { fetched ->
+                if (fetched.isNotEmpty()) {
+                    daftarTempatWisata = fetched
+                }
+            },
+            onFailure = { e ->
+                Log.w("RekomendasiTempatScreen", "Failed to fetch tempat_wisata from Firestore", e)
+                // keep default list
+            }
+        )
+    }
+
+    // Listen for gallery result (savedStateHandle)
+    val selectedImageLocalPath by navController.currentBackStackEntry
         ?.savedStateHandle
-        ?.getStateFlow("selectedImageUri", "")
+        ?.getStateFlow("selectedImageLocalPath", "")
         ?.collectAsState(initial = "")
         ?: remember { mutableStateOf("") }
 
     var showTambahDialog by remember { mutableStateOf(false) }
+
+    LaunchedEffect(selectedImageLocalPath) {
+        if (selectedImageLocalPath.isNotBlank()) {
+            showTambahDialog = true
+            navController.currentBackStackEntry?.savedStateHandle?.remove<String>("selectedImageLocalPath")
+        }
+    }
 
     Scaffold(
         floatingActionButton = {
@@ -238,27 +264,19 @@ fun RekomendasiTempatScreen(
                 TambahTempatWisataDialog(
                     firestore = firestore,
                     context = LocalContext.current,
-                    initialGambarUri = selectedImageUriString.takeIf { it.isNotBlank() }?.let(Uri::parse),
+                    initialGambarLocalPath = selectedImageLocalPath.ifBlank { null },
                     onOpenGallery = {
-                        // close dialog then open gallery
                         showTambahDialog = false
                         navController.navigate(Screen.Gallery.route)
                     },
                     onDismiss = { showTambahDialog = false },
-                    onTambah = { nama, deskripsi, gambarUri ->
-                        val uriString = gambarUri?.toString() ?: ""
-                        val nuevoTempat = TempatWisata(nama, deskripsi, uriString)
+                    onTambah = { nama, deskripsi, gambarLocalPath ->
+                        val path = gambarLocalPath ?: ""
+                        val nuevoTempat = TempatWisata(nama, deskripsi, path)
                         daftarTempatWisata = daftarTempatWisata + nuevoTempat
-                        // clear one-shot result
-                        navController.currentBackStackEntry?.savedStateHandle?.remove<String>("selectedImageUri")
                         showTambahDialog = false
                     }
                 )
-            } else {
-                // If dialog closed and we have a selected image from gallery, reopen dialog and keep selection.
-                if (selectedImageUriString.isNotBlank()) {
-                    showTambahDialog = true
-                }
             }
         }
     }
@@ -343,20 +361,22 @@ fun TempatItemEditable(
 fun TambahTempatWisataDialog(
     firestore: FirebaseFirestore,
     context: Context,
-    initialGambarUri: Uri? = null,
+    initialGambarLocalPath: String? = null,
     onOpenGallery: () -> Unit,
     onDismiss: () -> Unit,
     onTambah: (String, String, String?) -> Unit
 ) {
     var nama by remember { mutableStateOf("") }
     var deskripsi by remember { mutableStateOf("") }
-    var gambarUri by remember { mutableStateOf<Uri?>(initialGambarUri) }
+    var gambarUri by remember { mutableStateOf<Uri?>(null) }
+    var gambarLocalPath by remember { mutableStateOf<String?>(initialGambarLocalPath) }
     var isUploading by remember { mutableStateOf(false) }
 
     val gambarLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
     ) { uri: Uri? ->
         gambarUri = uri
+        gambarLocalPath = null
     }
 
     AlertDialog(
@@ -380,19 +400,32 @@ fun TambahTempatWisataDialog(
                     enabled = !isUploading
                 )
                 Spacer(modifier = Modifier.height(8.dp))
-                gambarUri?.let { uri ->
-                    Image(
-                        painter = rememberAsyncImagePainter(model = uri),
-                        contentDescription = "Gambar yang dipilih",
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(200.dp),
-                        contentScale = ContentScale.Crop
-                    )
+
+                when {
+                    gambarUri != null -> {
+                        Image(
+                            painter = rememberAsyncImagePainter(model = gambarUri),
+                            contentDescription = "Gambar yang dipilih",
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(200.dp),
+                            contentScale = ContentScale.Crop
+                        )
+                    }
+                    !gambarLocalPath.isNullOrBlank() -> {
+                        Image(
+                            painter = rememberAsyncImagePainter(model = gambarLocalPath),
+                            contentDescription = "Gambar yang dipilih",
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(200.dp),
+                            contentScale = ContentScale.Crop
+                        )
+                    }
                 }
+
                 Spacer(modifier = Modifier.height(8.dp))
 
-                // existing method: pick from storage
                 Button(
                     onClick = { gambarLauncher.launch("image/*") },
                     modifier = Modifier.fillMaxWidth(),
@@ -403,7 +436,6 @@ fun TambahTempatWisataDialog(
 
                 Spacer(modifier = Modifier.height(8.dp))
 
-                // NEW: open GalleryScreen (reuse existing GalleryScreen)
                 OutlinedButton(
                     onClick = onOpenGallery,
                     modifier = Modifier.fillMaxWidth(),
@@ -416,24 +448,44 @@ fun TambahTempatWisataDialog(
         confirmButton = {
             Button(
                 onClick = {
-                    if (nama.isNotBlank() && deskripsi.isNotBlank() && gambarUri != null) {
+                    if (nama.isNotBlank() && deskripsi.isNotBlank() && (gambarUri != null || !gambarLocalPath.isNullOrBlank())) {
                         isUploading = true
                         val tempatWisata = TempatWisata(nama, deskripsi)
 
-                        uploadImageToFirestore(
-                            firestore,
-                            context,
-                            gambarUri!!,
-                            tempatWisata,
-                            onSuccess = { uploadedTempat ->
-                                isUploading = false
-                                onTambah(nama, deskripsi, uploadedTempat.gambarUriString)
-                                onDismiss()
-                            },
-                            onFailure = { _ ->
-                                isUploading = false
+                        when {
+                            gambarUri != null -> {
+                                uploadImageToFirestore(
+                                    firestore,
+                                    context,
+                                    gambarUri!!,
+                                    tempatWisata,
+                                    onSuccess = { uploadedTempat ->
+                                        isUploading = false
+                                        onTambah(nama, deskripsi, uploadedTempat.gambarUriString)
+                                        onDismiss()
+                                    },
+                                    onFailure = { _ ->
+                                        isUploading = false
+                                    }
+                                )
                             }
-                        )
+                            !gambarLocalPath.isNullOrBlank() -> {
+                                uploadImageToFirestoreWithLocalPath(
+                                    firestore,
+                                    context,
+                                    gambarLocalPath!!,
+                                    tempatWisata,
+                                    onSuccess = { uploadedTempat ->
+                                        isUploading = false
+                                        onTambah(nama, deskripsi, uploadedTempat.gambarUriString)
+                                        onDismiss()
+                                    },
+                                    onFailure = { _ ->
+                                        isUploading = false
+                                    }
+                                )
+                            }
+                        }
                     }
                 },
                 enabled = !isUploading
@@ -451,8 +503,7 @@ fun TambahTempatWisataDialog(
         dismissButton = {
             Button(
                 onClick = onDismiss,
-                colors =
-                    ButtonDefaults.buttonColors(backgroundColor = MaterialTheme.colors.surface),
+                colors = ButtonDefaults.buttonColors(backgroundColor = MaterialTheme.colors.surface),
                 enabled = !isUploading
             ) {
                 Text("Batal")
@@ -476,19 +527,55 @@ fun uploadImageToFirestore(
 
     val imageDao = db.imageDao()
 
-    val localPath = saveImageLocally(context, imageUri)
-    CoroutineScope(Dispatchers.IO).launch {
-        val imageId = imageDao.insert(ImageEntity(localPath = localPath))
+    try {
+        val localPath = saveImageLocally(context, imageUri)
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                imageDao.insert(ImageEntity(localPath = localPath))
 
-        val updatedTempatWisata = tempatWisata.copy(gambarUriString = localPath)
-        firestore.collection("tempat_wisata")
-            .add(updatedTempatWisata)
-            .addOnSuccessListener {
-                onSuccess(updatedTempatWisata)
-            }
-            .addOnFailureListener { e: Exception ->
+                val updatedTempatWisata = tempatWisata.copy(gambarUriString = localPath)
+                firestore.collection("tempat_wisata")
+                    .add(updatedTempatWisata)
+                    .addOnSuccessListener { onSuccess(updatedTempatWisata) }
+                    .addOnFailureListener { e -> onFailure(e) }
+            } catch (e: Exception) {
                 onFailure(e)
             }
+        }
+    } catch (e: Exception) {
+        onFailure(e)
+    }
+}
+
+// New helper for local file path (already saved by GalleryScreen/Room)
+fun uploadImageToFirestoreWithLocalPath(
+    firestore: FirebaseFirestore,
+    context: Context,
+    localPath: String,
+    tempatWisata: TempatWisata,
+    onSuccess: (TempatWisata) -> Unit,
+    onFailure: (Exception) -> Unit
+) {
+    val db = Room.databaseBuilder(
+        context,
+        AppDatabase::class.java, "travelupa-database"
+    ).build()
+
+    val imageDao = db.imageDao()
+
+    CoroutineScope(Dispatchers.IO).launch {
+        try {
+            // keep same behavior: store to Room as well
+            imageDao.insert(ImageEntity(localPath = localPath))
+
+            val updatedTempatWisata = tempatWisata.copy(gambarUriString = localPath)
+            firestore.collection("tempat_wisata")
+                .add(updatedTempatWisata)
+                .addOnSuccessListener { onSuccess(updatedTempatWisata) }
+                .addOnFailureListener { e -> onFailure(e) }
+        } catch (e: Exception) {
+            onFailure(e)
+        }
     }
 }
 
@@ -868,4 +955,41 @@ fun saveBitmapToUri(context: Context, bitmap: Bitmap): Uri {
     bitmap.compress(Bitmap.CompressFormat.JPEG, 100, outputStream)
     outputStream.close()
     return Uri.fromFile(file)
+}
+
+fun fetchRekomendasiTempatWisata(
+    firestore: FirebaseFirestore,
+    onSuccess: (List<TempatWisata>) -> Unit,
+    onFailure: (Exception) -> Unit
+) {
+    firestore.collection("tempat_wisata")
+        .get()
+        .addOnSuccessListener { querySnapshot ->
+            try {
+                val result = querySnapshot.documents.mapNotNull { doc ->
+                    val nama = doc.getString("nama") ?: doc.getString("Nama") ?: ""
+                    val deskripsi = doc.getString("deskripsi") ?: doc.getString("Deskripsi") ?: ""
+                    val gambarUriString = doc.getString("gambarUriString")
+                        ?: doc.getString("gambar")
+                        ?: doc.getString("image")
+
+                    if (nama.isBlank() || deskripsi.isBlank()) {
+                        null
+                    } else {
+                        TempatWisata(
+                            nama = nama,
+                            deskripsi = deskripsi,
+                            gambarUriString = gambarUriString,
+                            gambarResId = null
+                        )
+                    }
+                }
+                onSuccess(result)
+            } catch (e: Exception) {
+                onFailure(e)
+            }
+        }
+        .addOnFailureListener { e ->
+            onFailure(e)
+        }
 }
