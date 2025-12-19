@@ -32,7 +32,6 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.runtime.LaunchedEffect
@@ -57,12 +56,11 @@ import com.google.firebase.firestore.FirebaseFirestore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import java.io.File
-import kotlinx.coroutines.launch
 import com.example.travelupa.AppDatabase
+import com.example.travelupa.ImageDao
 import com.example.travelupa.ImageEntity
 import java.io.FileOutputStream
 import java.util.UUID
-import kotlin.text.get
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -81,7 +79,9 @@ class MainActivity : ComponentActivity() {
 sealed class Screen(val route: String) {
     object Login : Screen("login")
     object RekomendasiTempat : Screen("rekomendasi_tempat")
+    object Gallery : Screen("gallery")
 }
+
 @Composable
 fun AppNavigation() {
     val navController = rememberNavController()
@@ -101,9 +101,31 @@ fun AppNavigation() {
         }
         composable(Screen.RekomendasiTempat.route) {
             RekomendasiTempatScreen(
+                navController = navController,
                 onBackToLogin = {
                     navController.navigateUp()
                 }
+            )
+        }
+        composable(Screen.Gallery.route) {
+            val context = LocalContext.current
+            // Reuse Room wiring style already used in this file (minimal change)
+            val db = remember {
+                Room.databaseBuilder(
+                    context,
+                    AppDatabase::class.java,
+                    "travelupa-database"
+                ).build()
+            }
+            GalleryScreen(
+                imageDao = db.imageDao(),
+                onImageSelected = { uri ->
+                    navController.previousBackStackEntry
+                        ?.savedStateHandle
+                        ?.set("selectedImageUri", uri.toString())
+                    navController.navigateUp()
+                },
+                onBack = { navController.navigateUp() }
             )
         }
     }
@@ -155,6 +177,7 @@ fun GreetingScreen() {
 
 @Composable
 fun RekomendasiTempatScreen(
+    navController: androidx.navigation.NavHostController,
     onBackToLogin: (()->Unit)?=null
 ) {
     val firestore = FirebaseFirestore.getInstance()
@@ -174,7 +197,16 @@ fun RekomendasiTempatScreen(
             )
         )
     }
+
+    // Listen for gallery result (savedStateHandle) and keep it in state so we can prefill dialog.
+    val selectedImageUriString by navController.currentBackStackEntry
+        ?.savedStateHandle
+        ?.getStateFlow("selectedImageUri", "")
+        ?.collectAsState(initial = "")
+        ?: remember { mutableStateOf("") }
+
     var showTambahDialog by remember { mutableStateOf(false) }
+
     Scaffold(
         floatingActionButton = {
             FloatingActionButton(
@@ -206,14 +238,27 @@ fun RekomendasiTempatScreen(
                 TambahTempatWisataDialog(
                     firestore = firestore,
                     context = LocalContext.current,
+                    initialGambarUri = selectedImageUriString.takeIf { it.isNotBlank() }?.let(Uri::parse),
+                    onOpenGallery = {
+                        // close dialog then open gallery
+                        showTambahDialog = false
+                        navController.navigate(Screen.Gallery.route)
+                    },
                     onDismiss = { showTambahDialog = false },
                     onTambah = { nama, deskripsi, gambarUri ->
                         val uriString = gambarUri?.toString() ?: ""
                         val nuevoTempat = TempatWisata(nama, deskripsi, uriString)
                         daftarTempatWisata = daftarTempatWisata + nuevoTempat
+                        // clear one-shot result
+                        navController.currentBackStackEntry?.savedStateHandle?.remove<String>("selectedImageUri")
                         showTambahDialog = false
                     }
                 )
+            } else {
+                // If dialog closed and we have a selected image from gallery, reopen dialog and keep selection.
+                if (selectedImageUriString.isNotBlank()) {
+                    showTambahDialog = true
+                }
             }
         }
     }
@@ -298,12 +343,14 @@ fun TempatItemEditable(
 fun TambahTempatWisataDialog(
     firestore: FirebaseFirestore,
     context: Context,
+    initialGambarUri: Uri? = null,
+    onOpenGallery: () -> Unit,
     onDismiss: () -> Unit,
     onTambah: (String, String, String?) -> Unit
 ) {
     var nama by remember { mutableStateOf("") }
     var deskripsi by remember { mutableStateOf("") }
-    var gambarUri by remember { mutableStateOf<Uri?>(null) }
+    var gambarUri by remember { mutableStateOf<Uri?>(initialGambarUri) }
     var isUploading by remember { mutableStateOf(false) }
 
     val gambarLauncher = rememberLauncherForActivityResult(
@@ -344,12 +391,25 @@ fun TambahTempatWisataDialog(
                     )
                 }
                 Spacer(modifier = Modifier.height(8.dp))
+
+                // existing method: pick from storage
                 Button(
                     onClick = { gambarLauncher.launch("image/*") },
                     modifier = Modifier.fillMaxWidth(),
                     enabled = !isUploading
                 ) {
                     Text("Pilih Gambar")
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // NEW: open GalleryScreen (reuse existing GalleryScreen)
+                OutlinedButton(
+                    onClick = onOpenGallery,
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = !isUploading
+                ) {
+                    Text("Ambil Foto (Gallery)")
                 }
             }
         },
@@ -370,7 +430,7 @@ fun TambahTempatWisataDialog(
                                 onTambah(nama, deskripsi, uploadedTempat.gambarUriString)
                                 onDismiss()
                             },
-                            onFailure = { e ->
+                            onFailure = { _ ->
                                 isUploading = false
                             }
                         )
@@ -450,8 +510,6 @@ fun saveImageLocally(context: Context, uri: Uri): String {
         throw e
     }
 }
-
-
 
 
 
@@ -811,5 +869,3 @@ fun saveBitmapToUri(context: Context, bitmap: Bitmap): Uri {
     outputStream.close()
     return Uri.fromFile(file)
 }
-
-
